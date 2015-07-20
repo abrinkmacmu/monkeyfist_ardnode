@@ -2,6 +2,8 @@
 #include <std_msgs/UInt16.h>
 #include <std_msgs/Int16.h>
 
+TODO add float from ros
+
 struct linearActuatorObj{
   int A_pin;
   int A_history[3];
@@ -18,11 +20,11 @@ struct linearActuatorObj{
   unsigned long A_currentSampleTimeMS;
   unsigned long A_lastSampleTimeMS;
   unsigned long A_lastGoodSampleTimeMS; 
-  boolean M_Enable;
+  boolean M_enable;
   int M_DIRPin;
   int M_PWMPin;
   int M_error;
-  int M_Command;
+  int M_command;
   int M_PWMCommand;
   int M_deadband;
 };
@@ -39,7 +41,7 @@ struct linearActuatorObj *linearActuatorObjectCreate(int Apin, float maxRateofCh
   obj->A_lowLimit = lowLimit;
   obj->A_highLimit = highLimit;
   obj->M_deadband = deadband;
-  obj->M_Command = 400;
+  obj->M_command = 400;
   
   // initialize Motor Pins
   pinMode(obj->M_DIRPin, OUTPUT);
@@ -57,7 +59,7 @@ void linearActuatorObjectDestroy(struct linearActuatorObj *who){
 // Functions ********************************************************
 
 void sampleandFilter(struct linearActuatorObj *Act){
-
+  Act->A_lastSampleTimeMS = Act->A_currentSampleTimeMS;
   Act->A_raw = analogRead(Act->A_pin);
   Act->A_currentSampleTimeMS = millis();
   Act->A_history[2] = Act->A_history[1];
@@ -80,11 +82,13 @@ void sampleandFilter(struct linearActuatorObj *Act){
 void sensorValidityCheck(struct linearActuatorObj *Act){
   
   // check for high rate of change
-  float err = Act->A_position - Act->A_lastPosition;
-  float period = Act->A_currentSampleTimeMS - Act->A_lastSampleTimeMS;
-  float thisRate = abs( err / period );
-  float addition = (thisRate > Act->A_maxRateofChange) ? 0.2 : -0.2 ;
-  Act->A_erraticPercent = Act->A_erraticPercent + addition;
+  float err, period, thisRate, increment, 
+  err = Act->A_position - Act->A_lastPosition;
+  period = Act->A_currentSampleTimeMS - Act->A_lastSampleTimeMS;
+  
+  thisRate = ( period == 0) ?  abs( err / period ): 0.0;
+  increment= (thisRate > Act->A_maxRateofChange) ? 0.2 : -0.2 ;
+  Act->A_erraticPercent = Act->A_erraticPercent + increment;
   
   if(Act->A_erraticPercent > 2.0){Act->A_erraticPercent = 2.0;} // burn off windup
   if(Act->A_erraticPercent < 0.0){Act->A_erraticPercent = 0.0;}
@@ -100,23 +104,36 @@ void sensorValidityCheck(struct linearActuatorObj *Act){
 
 } //*******************************************************************
 
-void setDiagnostic(struct linearActuatorObj *Act){
-  if(Act->A_isErratic || Act->A_isFaulted){
-    // TO DO Send ROS Signal here TO DO
-    Act->M_Enable = false;
-    
+void updateAnalogParameters(struct linearActuatorObj *Act){
+ if(Act->A_isErratic || Act->A_isFaulted){
+ 
+    Act->M_enable = false;    
     Act->A_lastPosition = Act->A_position;
     Act->A_position = Act->A_lastGoodPosition;
+  }else{
+    Act->M_enable = true;
+    Act->A_lastPosition = Act->A_position;
+  }
     
-    }
 } //*******************************************************************
 
-void updateAnalogParameters(struct linearActuatorObj *Act){
- // if(
-} //*******************************************************************
-
-void updateMotor(struct linearActuatorObj *Act){
- // if(
+void updateMotor(struct linearActuatorObj *Act, int linValCmdFromROS){
+  Act->M_command = linValCmdFromRos;
+  
+  if( Act->M_enable && (abs(Act->M_error) > Act->M_deadband) ){
+    
+   Act->M_error = Act->A_position - Act->M_command;
+   TODO add logic here for PWM and directionality
+   Act->M_direction = ( Act->M_error > 0) ? 1 : 0;
+   Act->M_PWMCommand = some f(error) 
+ 
+ }else{
+   Act->M_direction = 0;
+   Act->M_PWMCommand = 0;
+ }
+   digitalWrite(Act->M_DIRPin, Act->M_direction);
+   analogWrite(Act->M_PWMPin,Act->M_PWMCommand);
+   
 } //*******************************************************************
 
 // ROS parameters***********************************************
@@ -126,6 +143,7 @@ ros::NodeHandle  nh;
 std_msgs::UInt16 val1SM, val2SM;
 std_msgs::UInt16 cmd1SM, cmd2SM;
 std_msgs::UInt16 diagSM;
+std_msgs::Int16 erratic1SM, erratic2SM;
 
 ros::Publisher linValActual1_pub("linValActual1", &val1SM);
 ros::Publisher linValActual2_pub("linValActual2", &val2SM);
@@ -135,23 +153,20 @@ ros::Publisher linValCmdEcho2_pub("linValcmdEcho2", &cmd2SM);
 
 ros::Publisher arduinoDiagnostic_pub("arduinoDiagnostic_pub", &diagSM);
 
+ros::Publisher erraticPercent1_pub("erraticPercent1", &erratic1SM);
+ros::Publisher erraticPercent2_pub("erraticPercent2", &erratic2SM);
+
 int linValCmdFromROS1 = 400;
 int linValCmdFromROS2 = 400;
 
 void linValCmd1_Cb( const std_msgs::UInt16& msg){
-  if(msg.data < 160){
-    linValCmdFromROS1 = 160;
-  }else{
-    linValCmdFromROS1 = msg.data;
-  }
+
+    linValCmdFromROS1 = (msg.data < 160) ? 160: msg.data;
 }
 
 void linValCmd2_Cb( const std_msgs::UInt16& msg){
-  if(msg.data < 160){
-    linValCmdFromROS2 = 160;
-  }else{
-    linValCmdFromROS2 = msg.data;
-  }
+  
+   linValCmdFromROS1 = (msg.data < 160) ? 160: msg.data;
 }
 
 ros:: Subscriber<std_msgs::UInt16> sub1("linValCmd1",linValCmd1_Cb);
@@ -187,21 +202,21 @@ void loop(){
   sensorValidityCheck(linAct1);
   sensorValidityCheck(linAct2);
   
-  setDiagnostic(linAct1);
-  setDiagnostic(linAct2);
-  
   updateAnalogParameters(linAct1);
   updateAnalogParameters(linAct2);
   
-  updateMotor(linAct1);
-  updateMotor(linAct2);
+  updateMotor(linAct1, linValCmdFromROS1);
+  updateMotor(linAct2, linValCmdFromROS2);
   
   // update and Send ROS Parameters
   
   val1SM.data = linAct1->A_position;
   val2SM.data = linAct2->A_position;
-  cmd1SM.data = linAct1->M_Command;
-  cmd2SM.data = linAct2->M_Command;
+  cmd1SM.data = linAct1->M_command;
+  cmd2SM.data = linAct2->M_command;
+  erratic1SM.data = (int)( 100.0 * linAct1->A_erraticPercent);
+  erratic2SM.data = (int)( 100.0 * linAct2->A_erraticPercent);
+  TODO diagSM.data = linAct2->M_enable << 1 + linAct1->M_enable;
   
   linValActual1_pub.publish( &val1SM );
   linValActual2_pub.publish( &val2SM );
@@ -209,9 +224,14 @@ void loop(){
   linValCmdEcho1_pub.publish( &cmd1SM);
   linValCmdEcho2_pub.publish( &cmd2SM);
       
+  erraticPercent1_pub.publish( &erratic1SM);
+  erraticPercent2_pub.publish( &erratic2SM);
+  
+  arduinoDiagnostic_pub( &diagSM );
     
   nh.spinOnce();
   delay(10);
 }
+
 
 
